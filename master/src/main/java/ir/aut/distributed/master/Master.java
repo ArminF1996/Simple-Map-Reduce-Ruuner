@@ -181,9 +181,12 @@ public class Master {
                 "reduce phase is running...";
         if (codeLang.equals("py")) {
             int exitVal = Runtime.getRuntime()
-                    .exec("python " + reducerCodePath + " " + mergedMapped.getAbsolutePath() + finalOutputPath).waitFor();
+                    .exec("python " + reducerCodePath + " " + mergedMapped.getAbsolutePath() + " " + finalOutputPath).waitFor();
             if (exitVal != 0) {
                 currentPhase = "something wrong!";
+            } else {
+                currentPhase = "All done!</br>you can run another progress if you want!</br><p>" +
+                        "<a href=\"/final_result.out\" download>download result</a></p>";
             }
         }
         else if (codeLang.equals("cpp")) {
@@ -199,6 +202,7 @@ public class Master {
             }
             exitVal = Runtime.getRuntime()
                     .exec(defaultPath + "binary.out " + mergedMapped.getAbsolutePath() + " " + finalOutputPath).waitFor();
+            System.err.println(defaultPath + "binary.out " + mergedMapped.getAbsolutePath() + " " + finalOutputPath);
             if (exitVal != 0) {
                 currentPhase = "something wrong!";
             } else {
