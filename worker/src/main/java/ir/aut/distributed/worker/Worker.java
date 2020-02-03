@@ -1,6 +1,5 @@
 package ir.aut.distributed.worker;
 
-import com.sun.deploy.net.HttpResponse;
 import com.typesafe.config.Config;
 import com.typesafe.config.ConfigFactory;
 import spark.Request;
@@ -16,7 +15,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLEncoder;

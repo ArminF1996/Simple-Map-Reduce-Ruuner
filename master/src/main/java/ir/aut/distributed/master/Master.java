@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 
 import static spark.Spark.get;
 import static spark.Spark.post;
+import static spark.Spark.staticFiles;
 import static spark.debug.DebugScreen.enableDebugScreen;
 
 public class Master {
@@ -54,6 +55,7 @@ public class Master {
     public Master(Config configs) {
         defaultDir = new File(defaultPath);
         defaultDir.mkdirs();
+        staticFiles.externalLocation("/tmp/master/");
         master = configs.getString("master");
         idleExecutors = new LinkedBlockingQueue<>();
         workers = configs.getAnyRefList("worker").stream()
@@ -87,6 +89,9 @@ public class Master {
             req.attribute("org.eclipse.jetty.multipartConfig", new MultipartConfigElement("/temp"));
             try (InputStream input = req.raw().getPart("code_lang").getInputStream()) {
                 codeLang = IOUtils.toString(input);
+            }
+            try (InputStream input = req.raw().getPart("chunk_size").getInputStream()) {
+                blockSize = Integer.parseInt(IOUtils.toString(input));
             }
             mapperCodePath = defaultDir.getPath().concat("/mapper.").concat(codeLang);
             reducerCodePath = defaultDir.getPath().concat("/reducer.").concat(codeLang);
@@ -155,7 +160,6 @@ public class Master {
             shredDateFile();
             sendFilesForWorkers();
             runReducePhase();
-            currentPhase = "All done!</br>you can run another progress if you want!";
         } catch (IOException | InterruptedException e) {
             currentPhase = e.getMessage();
             e.printStackTrace();
@@ -178,9 +182,7 @@ public class Master {
         if (codeLang.equals("py")) {
             int exitVal = Runtime.getRuntime()
                     .exec("python " + reducerCodePath + " " + mergedMapped.getAbsolutePath() + finalOutputPath).waitFor();
-            if (exitVal == 0) {
-                //TODO do something with output file
-            } else {
+            if (exitVal != 0) {
                 currentPhase = "something wrong!";
             }
         }
@@ -191,13 +193,17 @@ public class Master {
             if (exitVal != 0) {
                 currentPhase = "Can not compile reducer code!";
                 return;
+            } else {
+                currentPhase = "All done!</br>you can run another progress if you want!</br><p>" +
+                        "<a href=\"/final_result.out\" download>download result</a></p>";
             }
             exitVal = Runtime.getRuntime()
                     .exec(defaultPath + "binary.out " + mergedMapped.getAbsolutePath() + " " + finalOutputPath).waitFor();
-            if (exitVal == 0) {
-                //TODO do something with output file
-            } else {
+            if (exitVal != 0) {
                 currentPhase = "something wrong!";
+            } else {
+                currentPhase = "All done!</br>you can run another progress if you want!</br><p>" +
+                        "<a href=\"/final_result.out\" download>download result</a></p>";
             }
         }
         mergedMapped.delete();
@@ -225,7 +231,7 @@ public class Master {
         String line;
         File tmpFile= null;
         while((line=br.readLine())!=null) {
-            if (tmpFile==null || tmpFile.length()/1024/1024 >= blockSize) {
+            if (tmpFile==null || tmpFile.length() >= blockSize*1024*1024) {
                 tmpFile = File.createTempFile("data",".tmp", new File(defaultPath));
                 files.add(tmpFile);
                 bw = new BufferedWriter(new FileWriter(tmpFile));
