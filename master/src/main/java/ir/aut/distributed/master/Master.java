@@ -196,13 +196,9 @@ public class Master {
             if (exitVal != 0) {
                 currentPhase = "Can not compile reducer code!";
                 return;
-            } else {
-                currentPhase = "All done!</br>you can run another progress if you want!</br><p>" +
-                        "<a href=\"/final_result.out\" download>download result</a></p>";
             }
             exitVal = Runtime.getRuntime()
                     .exec(defaultPath + "binary.out " + mergedMapped.getAbsolutePath() + " " + finalOutputPath).waitFor();
-            System.err.println(defaultPath + "binary.out " + mergedMapped.getAbsolutePath() + " " + finalOutputPath);
             if (exitVal != 0) {
                 currentPhase = "something wrong!";
             } else {
