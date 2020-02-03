@@ -8,6 +8,7 @@ import spark.utils.IOUtils;
 
 import javax.servlet.MultipartConfigElement;
 import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletResponse;
 import javax.servlet.http.Part;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -19,10 +20,12 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static spark.Spark.get;
@@ -32,36 +35,36 @@ import static spark.debug.DebugScreen.enableDebugScreen;
 public class Master {
 
     private String codeLang;
-    private String uploadPath = "/tmp/distributed/upload";
-    private String dataFilePath = uploadPath.concat("/code.data");
+    private String defaultPath = "/tmp/master/";
+    private String dataFilePath = defaultPath.concat("/code.data");
     private String mapperCodePath;
     private String reducerCodePath;
     private String currentPhase = "Waiting for upload files";
     private Queue<File> files;
     private int blockSize = 10;
+    private String finalOutputPath;
     private String master;
     private List<Executor> workers;
     private BlockingQueue<Executor> idleExecutors;
     private Queue<File> mappedFiles;
     private File mergedMapped;
     private Thread progressRunner;
+    private File defaultDir;
 
     public Master(Config configs) {
+        defaultDir = new File(defaultPath);
+        defaultDir.mkdirs();
         master = configs.getString("master");
         idleExecutors = new LinkedBlockingQueue<>();
         workers = configs.getAnyRefList("worker").stream()
                 .map(worker -> new Executor(worker.toString(), idleExecutors, mappedFiles)).collect(Collectors.toList());
         idleExecutors.addAll(workers);
         enableDebugScreen();
-        progressRunner = new Thread(this::startProgress, "Progress Runner");
         files = new ArrayQueue<>();
         mappedFiles = new ArrayQueue<>();
     }
 
     public void run(){
-
-        File uploadDir = new File(uploadPath);
-        uploadDir.mkdirs(); // create the upload directory if it doesn't exist
 
         get("/progress", (req, res) ->
                 currentPhase + "</br><p>reload this page to get latest progress state!</p>"
@@ -85,8 +88,8 @@ public class Master {
             try (InputStream input = req.raw().getPart("code_lang").getInputStream()) {
                 codeLang = IOUtils.toString(input);
             }
-            mapperCodePath = uploadDir.getPath().concat("/mapper.").concat(codeLang);
-            reducerCodePath = uploadDir.getPath().concat("/reducer.").concat(codeLang);
+            mapperCodePath = defaultDir.getPath().concat("/mapper.").concat(codeLang);
+            reducerCodePath = defaultDir.getPath().concat("/reducer.").concat(codeLang);
 
             Files.deleteIfExists(new File(dataFilePath).toPath());
             Files.deleteIfExists(new File(mapperCodePath).toPath());
@@ -114,9 +117,36 @@ public class Master {
             logInfo(req, tempDataFile, "uploaded_data_file");
             logInfo(req, tempMapperFile, "uploaded_mapper_code");
             logInfo(req, tempReducerFile, "uploaded_reducer_code");
+            progressRunner = new Thread(this::startProgress, "Progress Runner");
             progressRunner.start();
             res.redirect("/progress");
             return "";
+        });
+
+        post("/result", (req, res) -> {
+
+            req.attribute("org.eclipse.jetty.multipartConfig", new MultipartConfigElement("/temp"));
+            Path tempMappedFile = Files.createTempFile(new File(defaultPath).toPath(),"mapped",".tmp");
+
+            if(req.raw().getPart("mapped_file").getSubmittedFileName().isEmpty()) {
+                return "one or some files not selected to upload!";
+            }
+
+            try (InputStream input = req.raw().getPart("my_ip").getInputStream()) {
+                 String my_ip = IOUtils.toString(input);
+                 for (Executor executor : workers) {
+                    if(executor.getIp().equals(my_ip)) {
+                        idleExecutors.add(executor);
+                    }
+                 }
+            }
+
+            try (InputStream input = req.raw().getPart("mapped_file").getInputStream()) {
+                Files.copy(input, tempMappedFile, StandardCopyOption.REPLACE_EXISTING);
+            }
+            logInfo(req, tempMappedFile, "mapped_file");
+            mappedFiles.add(tempMappedFile.toFile());
+            return HttpServletResponse.SC_ACCEPTED;
         });
     }
 
@@ -125,6 +155,7 @@ public class Master {
             shredDateFile();
             sendFilesForWorkers();
             runReducePhase();
+            currentPhase = "All done!</br>you can run another progress if you want!";
         } catch (IOException | InterruptedException e) {
             currentPhase = e.getMessage();
             e.printStackTrace();
@@ -132,15 +163,21 @@ public class Master {
     }
 
     private void runReducePhase() throws IOException, InterruptedException {
-        mergedMapped = File.createTempFile("merged", "data", new File("/tmp"));
+        File mapperCode = new File(mapperCodePath);
+        mapperCode.delete();
+        finalOutputPath = defaultDir.getPath().concat("/final_result.out");
+        mergedMapped = File.createTempFile("merged", "data", new File(defaultPath));
         while (!mappedFiles.isEmpty()) {
             File tmpFile = mappedFiles.poll();
-            Runtime.getRuntime().exec("cat " + tmpFile.getAbsolutePath() + " >> " + mergedMapped);
+            Files.write(mergedMapped.toPath(), Files.readAllBytes(tmpFile.toPath()), StandardOpenOption.APPEND);
+            tmpFile.delete();
         }
+        currentPhase = "Shred data file done.</br>Sending shred files for workers and running mapper phase on it done" +
+                "</br>mapping is done for all files.</br>" +
+                "reduce phase is running...";
         if (codeLang.equals("py")) {
-            Process process = Runtime.getRuntime()
-                    .exec("python " + reducerCodePath + " " + mergedMapped.getAbsolutePath());
-            int exitVal = process.waitFor();
+            int exitVal = Runtime.getRuntime()
+                    .exec("python " + reducerCodePath + " " + mergedMapped.getAbsolutePath() + finalOutputPath).waitFor();
             if (exitVal == 0) {
                 //TODO do something with output file
             } else {
@@ -148,32 +185,35 @@ public class Master {
             }
         }
         else if (codeLang.equals("cpp")) {
-            Process process = Runtime.getRuntime()
-                    .exec("g++ " + reducerCodePath + " -o /tmp/binary.out");
-            int exitVal = process.waitFor();
+
+            int exitVal = Runtime.getRuntime()
+                    .exec("g++ --std=c++11 " + reducerCodePath + " -o " + defaultPath + "binary.out").waitFor();
             if (exitVal != 0) {
                 currentPhase = "Can not compile reducer code!";
                 return;
             }
-            process = Runtime.getRuntime()
-                    .exec("/tmp/binary.out " + mergedMapped.getAbsolutePath());
-            exitVal = process.waitFor();
+            exitVal = Runtime.getRuntime()
+                    .exec(defaultPath + "binary.out " + mergedMapped.getAbsolutePath() + " " + finalOutputPath).waitFor();
             if (exitVal == 0) {
                 //TODO do something with output file
             } else {
                 currentPhase = "something wrong!";
             }
         }
+        mergedMapped.delete();
     }
 
-    private void sendFilesForWorkers() throws InterruptedException {
+    private void sendFilesForWorkers() throws InterruptedException, IOException {
         currentPhase = "Shred data file done.</br>Sending shred files for workers ...";
         int total_files = files.size();
         while (!files.isEmpty()) {
             currentPhase = "Shred data file done.</br>Sending shred files for workers and running mapper phase on it..." +
                     "</br>mapping is done for " + mappedFiles.size() + " files from " + total_files + " files.";
             Executor executor = idleExecutors.take();
-            executor.exe(files.poll(), mapperCodePath, codeLang);
+            executor.exec(files.poll(), mapperCodePath, codeLang);
+        }
+        while (mappedFiles.size() != total_files){
+            TimeUnit.SECONDS.sleep(1);
         }
     }
 
@@ -186,7 +226,7 @@ public class Master {
         File tmpFile= null;
         while((line=br.readLine())!=null) {
             if (tmpFile==null || tmpFile.length()/1024/1024 >= blockSize) {
-                tmpFile = File.createTempFile("data",".tmp", new File("/tmp"));
+                tmpFile = File.createTempFile("data",".tmp", new File(defaultPath));
                 files.add(tmpFile);
                 bw = new BufferedWriter(new FileWriter(tmpFile));
             }
@@ -197,6 +237,7 @@ public class Master {
             bw.close();
         }
         br.close();
+        dataFile.delete();
     }
 
     // methods used for logging
