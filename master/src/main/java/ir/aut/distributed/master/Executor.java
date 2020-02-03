@@ -1,4 +1,4 @@
-package ir.aut.distributed;
+package ir.aut.distributed.master;
 
 import java.io.File;
 import java.util.Queue;
